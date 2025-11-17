@@ -1,0 +1,130 @@
+"""Deep Q-Network (DQN) for poker."""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from config import PokerConfig as cfg
+
+
+class DQNNetwork(nn.Module):
+    """Deep Q-Network that outputs Q-values for each action."""
+
+    def __init__(self, state_size=None, action_size=None, dropout_rate=0.3):
+        super(DQNNetwork, self).__init__()
+
+        if state_size is None:
+            state_size = cfg.STATE_SIZE
+        if action_size is None:
+            action_size = cfg.NUM_ACTIONS
+
+        # Shared layers
+        self.fc1 = nn.Linear(state_size, 1024)
+        self.bn1 = nn.BatchNorm1d(1024)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
+        self.fc2 = nn.Linear(1024, 512)
+        self.bn2 = nn.BatchNorm1d(512)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        
+        self.fc3 = nn.Linear(512, 256)
+        self.bn3 = nn.BatchNorm1d(256)
+        self.dropout3 = nn.Dropout(dropout_rate)
+        
+        self.fc4 = nn.Linear(256, 128)
+        self.bn4 = nn.BatchNorm1d(128)
+
+        # Q-value head
+        self.q_fc1 = nn.Linear(128, 128)
+        self.q_bn1 = nn.BatchNorm1d(128)
+        self.q_dropout1 = nn.Dropout(dropout_rate * 0.5)
+        self.q_fc2 = nn.Linear(128, 64)
+        self.q_fc3 = nn.Linear(64, action_size)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(self.device)
+
+    def forward(self, x):
+        """Forward pass through the network."""
+        # Shared layers
+        x = F.relu(self.bn1(self.fc1(x)))
+        x = self.dropout1(x)
+        
+        x = F.relu(self.bn2(self.fc2(x)))
+        x = self.dropout2(x)
+        
+        x = F.relu(self.bn3(self.fc3(x)))
+        x = self.dropout3(x)
+        
+        x = F.relu(self.bn4(self.fc4(x)))
+        
+        # Q-value head
+        q = F.relu(self.q_bn1(self.q_fc1(x)))
+        q = self.q_dropout1(q)
+        q = F.relu(self.q_fc2(q))
+        q = self.q_fc3(q)  # No activation - raw Q-values
+
+        return q
+
+    def predict(self, state: np.ndarray) -> np.ndarray:
+        """
+        Predict Q-values for a single state.
+
+        Args:
+            state: State vector (numpy array)
+
+        Returns:
+            Q-values for each action
+        """
+        self.eval()
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            q_values = self.forward(state_tensor)
+            q_values = q_values.cpu().numpy()[0]
+
+        return q_values
+
+    def predict_batch(self, states: np.ndarray) -> np.ndarray:
+        """
+        Predict Q-values for a batch of states.
+
+        Args:
+            states: Batch of state vectors (numpy array)
+
+        Returns:
+            Q-values for each state-action pair
+        """
+        self.eval()
+        with torch.no_grad():
+            states_tensor = torch.FloatTensor(states).to(self.device)
+            q_values = self.forward(states_tensor)
+            q_values = q_values.cpu().numpy()
+
+        return q_values
+
+
+if __name__ == "__main__":
+    # Test the network
+    print("Testing DQNNetwork...")
+
+    model = DQNNetwork()
+    print(f"Model device: {model.device}")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+
+    # Test with random state
+    state = np.random.randn(cfg.STATE_SIZE).astype(np.float32)
+    q_values = model.predict(state)
+
+    print(f"\nTest prediction:")
+    print(f"Q-values shape: {q_values.shape}")
+    print(f"Q-values: {q_values}")
+
+    # Test batch prediction
+    batch_states = np.random.randn(32, cfg.STATE_SIZE).astype(np.float32)
+    batch_q_values = model.predict_batch(batch_states)
+
+    print(f"\nBatch prediction:")
+    print(f"Q-values shape: {batch_q_values.shape}")
+
+    print("\nNetwork test complete!")
+

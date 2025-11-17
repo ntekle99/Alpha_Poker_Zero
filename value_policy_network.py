@@ -10,7 +10,7 @@ from config import PokerConfig as cfg
 class PokerValuePolicyNetwork(nn.Module):
     """Neural network that outputs both policy and value for poker states."""
 
-    def __init__(self, state_size=None, action_size=None):
+    def __init__(self, state_size=None, action_size=None, dropout_rate=0.3):
         super(PokerValuePolicyNetwork, self).__init__()
 
         if state_size is None:
@@ -18,40 +18,65 @@ class PokerValuePolicyNetwork(nn.Module):
         if action_size is None:
             action_size = cfg.NUM_ACTIONS
 
-        # Shared layers
-        self.fc1 = nn.Linear(state_size, 512)
-        self.bn1 = nn.BatchNorm1d(512)
-        self.fc2 = nn.Linear(512, 256)
-        self.bn2 = nn.BatchNorm1d(256)
-        self.fc3 = nn.Linear(256, 128)
-        self.bn3 = nn.BatchNorm1d(128)
+        # Shared layers - deeper architecture
+        self.fc1 = nn.Linear(state_size, 1024)
+        self.bn1 = nn.BatchNorm1d(1024)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
+        self.fc2 = nn.Linear(1024, 512)
+        self.bn2 = nn.BatchNorm1d(512)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        
+        self.fc3 = nn.Linear(512, 256)
+        self.bn3 = nn.BatchNorm1d(256)
+        self.dropout3 = nn.Dropout(dropout_rate)
+        
+        self.fc4 = nn.Linear(256, 128)
+        self.bn4 = nn.BatchNorm1d(128)
 
-        # Policy head
-        self.policy_fc1 = nn.Linear(128, 64)
-        self.policy_fc2 = nn.Linear(64, action_size)
+        # Policy head - deeper
+        self.policy_fc1 = nn.Linear(128, 128)
+        self.policy_bn1 = nn.BatchNorm1d(128)
+        self.policy_dropout1 = nn.Dropout(dropout_rate * 0.5)
+        self.policy_fc2 = nn.Linear(128, 64)
+        self.policy_fc3 = nn.Linear(64, action_size)
 
-        # Value head
-        self.value_fc1 = nn.Linear(128, 64)
-        self.value_fc2 = nn.Linear(64, 1)
+        # Value head - deeper
+        self.value_fc1 = nn.Linear(128, 128)
+        self.value_bn1 = nn.BatchNorm1d(128)
+        self.value_dropout1 = nn.Dropout(dropout_rate * 0.5)
+        self.value_fc2 = nn.Linear(128, 64)
+        self.value_fc3 = nn.Linear(64, 1)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(self.device)
 
     def forward(self, x):
         """Forward pass through the network."""
-        # Shared layers
+        # Shared layers with residual-like connections
         x = F.relu(self.bn1(self.fc1(x)))
+        x = self.dropout1(x)
+        
         x = F.relu(self.bn2(self.fc2(x)))
+        x = self.dropout2(x)
+        
         x = F.relu(self.bn3(self.fc3(x)))
-
+        x = self.dropout3(x)
+        
+        x = F.relu(self.bn4(self.fc4(x)))
+        
         # Policy head
-        policy = F.relu(self.policy_fc1(x))
-        policy = self.policy_fc2(policy)
+        policy = F.relu(self.policy_bn1(self.policy_fc1(x)))
+        policy = self.policy_dropout1(policy)
+        policy = F.relu(self.policy_fc2(policy))
+        policy = self.policy_fc3(policy)
         policy = F.softmax(policy, dim=-1)
 
         # Value head
-        value = F.relu(self.value_fc1(x))
-        value = torch.tanh(self.value_fc2(value))
+        value = F.relu(self.value_bn1(self.value_fc1(x)))
+        value = self.value_dropout1(value)
+        value = F.relu(self.value_fc2(value))
+        value = torch.tanh(self.value_fc3(value))
 
         return policy, value
 

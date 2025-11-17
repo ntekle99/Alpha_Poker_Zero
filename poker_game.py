@@ -294,21 +294,25 @@ class PokerGame:
         Get reward for the given player.
 
         Returns normalized reward (chips won/lost divided by starting stack).
+        Uses symmetric rewards: win = net chips gained, lose = chips lost.
+        Simple reward function focused on winning games, not just chips.
         """
         if not state.is_terminal:
             return None
 
+        my_contribution = cfg.STARTING_CHIPS - (
+            state.player1_stack if player == 1 else state.player2_stack
+        )
+        
         if state.winner == player:
-            # Won the pot
-            return (state.pot / 2) / cfg.STARTING_CHIPS
+            # Won the pot - reward is net chips gained
+            net_gain = state.pot - my_contribution
+            return net_gain / cfg.STARTING_CHIPS
         elif state.winner == -player:
-            # Lost
-            my_contribution = cfg.STARTING_CHIPS - (
-                state.player1_stack if player == 1 else state.player2_stack
-            )
+            # Lost - penalty is chips contributed
             return -my_contribution / cfg.STARTING_CHIPS
         else:
-            # Draw
+            # Draw - no net change
             return 0.0
 
     def get_canonical_state(self, state: PokerGameState, player: int) -> np.ndarray:
