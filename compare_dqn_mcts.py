@@ -102,21 +102,35 @@ def compare_dqn_vs_mcts(
     print(f"MCTS Simulations: {mcts_simulations}")
     print("=" * 60 + "\n")
     
-    # Load DQN model
-    dqn_model = DQNNetwork()
-    device = dqn_model.device
+    # Load DQN model - try to detect behavior_embedding_dim from saved weights
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(dqn_model_path, map_location=device)
+    
+    # Try to detect behavior_embedding_dim from model weights
+    behavior_dim = 0
+    if "fc1.weight" in checkpoint:
+        input_size = checkpoint["fc1.weight"].shape[1]
+        base_state_size = cfg.STATE_SIZE
+        if input_size > base_state_size:
+            behavior_dim = input_size - base_state_size
+            print(f"Detected behavior_embedding_dim: {behavior_dim}")
+    
+    dqn_model = DQNNetwork(behavior_embedding_dim=behavior_dim)
+    dqn_model.to(device)
     
     try:
-        dqn_model.load_state_dict(torch.load(dqn_model_path, map_location=device))
+        dqn_model.load_state_dict(checkpoint)
         print(f"Loaded DQN model from {dqn_model_path}")
+        if behavior_dim > 0:
+            print(f"  Model uses behavior embeddings (dim: {behavior_dim})")
     except Exception as e:
         error_msg = str(e)
         if "size mismatch" in error_msg:
             print(f"\nDQN Model incompatible: State size mismatch")
             print(f"   The saved model was trained with a different state representation.")
-            print(f"   Current state size: {dqn_model.fc1.in_features}")
-            print(f"\n   Solution: Retrain the DQN model with the current state representation:")
-            print(f"   python3 train_dqn.py --episodes 10000")
+            print(f"   Detected input size: {checkpoint.get('fc1.weight', torch.tensor(0)).shape[1] if 'fc1.weight' in checkpoint else 'unknown'}")
+            print(f"   Current state size: {cfg.STATE_SIZE}")
+            print(f"\n   Try with: --use-opponent-modeling --behavior-embedding-dim 16")
             return
         else:
             print(f"Error loading DQN model: {e}")

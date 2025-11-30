@@ -10,6 +10,13 @@ from poker_game import PokerGame, PokerGameState
 from value_policy_network import PokerValuePolicyNetwork
 from dqn_network import DQNNetwork
 
+# Import psychology network components
+try:
+    from psycnet import PsychologyNetwork, OpponentHistoryManager, ActionFeatureEncoder
+    PSYCNET_AVAILABLE = True
+except ImportError:
+    PSYCNET_AVAILABLE = False
+
 
 def ppo_select_action(
     model: PokerValuePolicyNetwork,
@@ -58,7 +65,8 @@ def dqn_select_action(
     game: PokerGame,
     state: PokerGameState,
     player: int,
-    deterministic: bool = True
+    deterministic: bool = True,
+    z: np.ndarray = None
 ) -> int:
     """
     Select action using DQN model.
@@ -78,9 +86,12 @@ def dqn_select_action(
     
     model.eval()
     with torch.no_grad():
-        state_tensor = torch.FloatTensor(state_vector).unsqueeze(0).to(model.device)
-        q_values = model(state_tensor)
-        q_values = q_values.cpu().numpy()[0]
+        state_tensor = torch.FloatTensor(state_vector).to(model.device)
+        z_tensor = torch.FloatTensor(z).to(model.device) if z is not None else None
+        q_values = model(state_tensor, z_tensor)
+        q_values = q_values.cpu().numpy()
+        if q_values.ndim > 1:
+            q_values = q_values[0]
         
         # Mask invalid actions
         masked_q_values = q_values + (1 - valid_actions) * -1e9
@@ -108,7 +119,10 @@ def compare_dqn_vs_ppo(
     hands_per_game: int = None,
     dqn_is_player1: bool = True,
     dqn_deterministic: bool = True,
-    ppo_deterministic: bool = True
+    ppo_deterministic: bool = True,
+    use_opponent_modeling: bool = False,
+    psychology_network_path: str = None,
+    behavior_embedding_dim: int = 16
 ):
     """
     Compare DQN bot vs PPO bot.
@@ -141,27 +155,75 @@ def compare_dqn_vs_ppo(
     print(f"Total hands: {num_games * hands_per_game}")
     print("=" * 60 + "\n")
     
-    # Load DQN model
-    dqn_model = DQNNetwork()
-    device = dqn_model.device
+    # Load DQN model - try to detect behavior_embedding_dim from saved weights
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(dqn_model_path, map_location=device)
+    
+    # Try to detect behavior_embedding_dim from model weights
+    behavior_dim = 0
+    if "fc1.weight" in checkpoint:
+        input_size = checkpoint["fc1.weight"].shape[1]
+        base_state_size = cfg.STATE_SIZE
+        if input_size > base_state_size:
+            behavior_dim = input_size - base_state_size
+            print(f"Detected behavior_embedding_dim: {behavior_dim}")
+    
+    # Override with explicit value if provided
+    if use_opponent_modeling and PSYCNET_AVAILABLE:
+        behavior_dim = behavior_embedding_dim
+    
+    dqn_model = DQNNetwork(behavior_embedding_dim=behavior_dim)
+    dqn_model.to(device)
     
     try:
-        dqn_model.load_state_dict(torch.load(dqn_model_path, map_location=device))
+        dqn_model.load_state_dict(checkpoint)
         print(f"Loaded DQN model from {dqn_model_path}")
+        if behavior_dim > 0:
+            print(f"  Model uses behavior embeddings (dim: {behavior_dim})")
     except Exception as e:
         error_msg = str(e)
         if "size mismatch" in error_msg:
             print(f"\nDQN Model incompatible: State size mismatch")
             print(f"   The saved model was trained with a different state representation.")
-            print(f"   Current state size: {dqn_model.fc1.in_features}")
-            print(f"\n   Solution: Retrain the DQN model with the current state representation:")
-            print(f"   python3 train_dqn.py --episodes 10000")
+            print(f"   Detected input size: {checkpoint.get('fc1.weight', torch.tensor(0)).shape[1] if 'fc1.weight' in checkpoint else 'unknown'}")
+            print(f"   Current state size: {cfg.STATE_SIZE}")
+            print(f"\n   Try with: --use-opponent-modeling --behavior-embedding-dim 16")
             return
         else:
             print(f"Error loading DQN model: {e}")
             return
     
     dqn_model.eval()
+    
+    # Initialize psychology network if needed
+    psychology_network = None
+    history_manager = None
+    if use_opponent_modeling and PSYCNET_AVAILABLE and behavior_dim > 0:
+        psychology_network = PsychologyNetwork(
+            behavior_embedding_dim=behavior_dim,
+            use_supervised_head=False
+        )
+        psychology_network.to(device)
+        psychology_network.eval()
+        
+        if psychology_network_path:
+            try:
+                state_dict = torch.load(psychology_network_path, map_location=device)
+                filtered_state_dict = {
+                    k: v for k, v in state_dict.items()
+                    if not k.startswith('supervised_')
+                }
+                psychology_network.load_state_dict(filtered_state_dict, strict=False)
+                print(f"Loaded psychology network from {psychology_network_path}")
+            except Exception as e:
+                print(f"Warning: Could not load psychology network: {e}")
+                psychology_network = None
+        
+        if psychology_network:
+            history_manager = OpponentHistoryManager(max_history_length=30)
+            print(f"Opponent modeling enabled")
+    
+    OPPONENT_ID = -1 if dqn_is_player1 else 1
     
     # Load PPO model
     ppo_model = PokerValuePolicyNetwork()
@@ -198,6 +260,10 @@ def compare_dqn_vs_ppo(
     print("Playing games...")
     for game_num in tqdm(range(num_games), desc="Comparing"):
         try:
+            # Reset opponent history for new game
+            if history_manager:
+                history_manager.reset_opponent(OPPONENT_ID)
+            
             # Initialize chip stacks for this game
             p1_chips = cfg.STARTING_CHIPS
             p2_chips = cfg.STARTING_CHIPS
@@ -206,6 +272,7 @@ def compare_dqn_vs_ppo(
             # Play multiple hands in this game
             for hand_num in range(hands_per_game):
                 state = game.init_new_hand()
+                previous_stage = state.stage
                 
                 # Set chip stacks (carry over from previous hands, minus blinds)
                 # The pot already has the blinds from init_new_hand(), so we just update stacks
@@ -240,15 +307,57 @@ def compare_dqn_vs_ppo(
                     
                     if is_dqn_turn:
                         # DQN bot's turn
-                        action = dqn_select_action(dqn_model, game, state, current_player, deterministic=dqn_deterministic)
+                        # Get behavior embedding if available
+                        z = None
+                        if history_manager and history_manager.has_history(OPPONENT_ID):
+                            history = history_manager.get_history(OPPONENT_ID)
+                            z, _ = psychology_network.encode_opponent(history, return_supervised=False)
+                        action = dqn_select_action(dqn_model, game, state, current_player, deterministic=dqn_deterministic, z=z)
                     else:
                         # PPO bot's turn
                         action = ppo_select_action(ppo_model, game, state, current_player, deterministic=ppo_deterministic)
+                        
+                        # Track PPO action for opponent modeling
+                        if history_manager:
+                            my_bet = state.player1_bet if current_player == 1 else state.player2_bet
+                            to_call = state.current_bet - my_bet
+                            bet_size = 0.0
+                            is_all_in = (action == cfg.ACTION_ALL_IN)
+                            
+                            if action == cfg.ACTION_BET_SMALL:
+                                bet_size = state.pot * 0.5
+                            elif action == cfg.ACTION_BET_MEDIUM:
+                                bet_size = state.pot
+                            elif action == cfg.ACTION_BET_LARGE:
+                                bet_size = state.pot * 2
+                            elif action == cfg.ACTION_ALL_IN:
+                                my_stack = state.player1_stack if current_player == 1 else state.player2_stack
+                                bet_size = my_stack - to_call
+                            
+                            is_new_betting_round = (state.stage != previous_stage)
+                            
+                            history_manager.add_action(
+                                opponent_id=OPPONENT_ID,
+                                action_features=ActionFeatureEncoder.encode_action_features(
+                                    action=action,
+                                    bet_size=bet_size,
+                                    pot_size=state.pot,
+                                    stage=state.stage,
+                                    position=0,
+                                    num_players=2,
+                                    had_initiative=(state.current_player == 1),
+                                    to_call=to_call,
+                                    raise_count=0,
+                                    is_all_in=is_all_in
+                                ),
+                                is_new_betting_round=is_new_betting_round
+                            )
                     
                     # Apply action
                     state = game.apply_action(state, action, current_player)
                     action_count += 1
                     total_actions += 1
+                    previous_stage = state.stage
                 
                 # Update chip stacks after hand
                 if game.is_terminal(state):
@@ -399,6 +508,12 @@ if __name__ == "__main__":
                         help="Use stochastic policy for DQN")
     parser.add_argument("--ppo-stochastic", action="store_true",
                         help="Use stochastic policy for PPO")
+    parser.add_argument("--use-opponent-modeling", action="store_true",
+                        help="Enable opponent modeling for DQN")
+    parser.add_argument("--psychology-network", type=str, default=None,
+                        help="Path to pretrained psychology network")
+    parser.add_argument("--behavior-embedding-dim", type=int, default=16,
+                        help="Dimension of behavior embedding (default: 16)")
     
     args = parser.parse_args()
     
@@ -411,6 +526,9 @@ if __name__ == "__main__":
         hands_per_game=args.hands_per_game,
         dqn_is_player1=dqn_is_player1,
         dqn_deterministic=not args.dqn_stochastic,
-        ppo_deterministic=not args.ppo_stochastic
+        ppo_deterministic=not args.ppo_stochastic,
+        use_opponent_modeling=args.use_opponent_modeling,
+        psychology_network_path=args.psychology_network,
+        behavior_embedding_dim=args.behavior_embedding_dim
     )
 

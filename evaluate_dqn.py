@@ -10,13 +10,23 @@ from poker_game import PokerGame
 from dqn_network import DQNNetwork
 from evaluate import get_random_action
 
+# Import psychology network components
+try:
+    from psycnet import PsychologyNetwork, OpponentHistoryManager, ActionFeatureEncoder
+    PSYCNET_AVAILABLE = True
+except ImportError:
+    PSYCNET_AVAILABLE = False
+
 
 def evaluate_dqn_model(
     model_path: str,
     num_games: int = 100,
     hands_per_game: int = None,
     vs_random: bool = True,
-    deterministic: bool = True
+    deterministic: bool = True,
+    use_opponent_modeling: bool = False,
+    psychology_network_path: str = None,
+    behavior_embedding_dim: int = 16
 ):
     """
     Evaluate a DQN-trained model.
@@ -30,6 +40,9 @@ def evaluate_dqn_model(
         hands_per_game: Number of hands per game (default: cfg.HANDS_PER_GAME)
         vs_random: If True, play against random; else self-play
         deterministic: If True, use greedy policy; else sample
+        use_opponent_modeling: Whether to use psychology network
+        psychology_network_path: Path to pretrained psychology network
+        behavior_embedding_dim: Dimension of behavior embedding
     """
     if hands_per_game is None:
         hands_per_game = cfg.HANDS_PER_GAME
@@ -43,10 +56,14 @@ def evaluate_dqn_model(
     print(f"Total hands: {num_games * hands_per_game}")
     print(f"Mode: {'vs Random' if vs_random else 'Self-play'}")
     print(f"Policy: {'Deterministic' if deterministic else 'Stochastic'}")
+    print(f"Opponent modeling: {use_opponent_modeling and PSYCNET_AVAILABLE}")
+    if use_opponent_modeling and PSYCNET_AVAILABLE:
+        print(f"Behavior embedding dim: {behavior_embedding_dim}")
     print("=" * 60 + "\n")
     
     # Load model
-    model = DQNNetwork()
+    behavior_dim = behavior_embedding_dim if (use_opponent_modeling and PSYCNET_AVAILABLE) else 0
+    model = DQNNetwork(behavior_embedding_dim=behavior_dim)
     device = model.device
     
     try:
@@ -70,8 +87,40 @@ def evaluate_dqn_model(
     
     model.eval()
     
+    # Initialize psychology network if needed
+    psychology_network = None
+    history_manager = None
+    if use_opponent_modeling and PSYCNET_AVAILABLE:
+        psychology_network = PsychologyNetwork(
+            behavior_embedding_dim=behavior_embedding_dim,
+            use_supervised_head=False
+        )
+        psychology_network.to(device)
+        psychology_network.eval()
+        
+        if psychology_network_path:
+            try:
+                state_dict = torch.load(psychology_network_path, map_location=device)
+                filtered_state_dict = {
+                    k: v for k, v in state_dict.items()
+                    if not k.startswith('supervised_')
+                }
+                psychology_network.load_state_dict(filtered_state_dict, strict=False)
+                print(f"Loaded psychology network from {psychology_network_path}")
+            except Exception as e:
+                print(f"Warning: Could not load psychology network: {e}")
+                print("Continuing without opponent modeling")
+                psychology_network = None
+        
+        if psychology_network:
+            history_manager = OpponentHistoryManager(max_history_length=30)
+            print(f"Opponent modeling enabled")
+    
     # Initialize game
     game = PokerGame()
+    
+    # Opponent ID for tracking
+    OPPONENT_ID = -1
     
     # Statistics
     model_game_wins = 0
@@ -95,9 +144,14 @@ def evaluate_dqn_model(
             game_pot_won = 0
             game_pot_contributed = 0
             
+            # Reset opponent history for new game
+            if history_manager:
+                history_manager.reset_opponent(OPPONENT_ID)
+            
             # Play multiple hands in this game
             for hand_num in range(hands_per_game):
                 state = game.init_new_hand()
+                previous_stage = state.stage
                 
                 # Set chip stacks (carry over from previous hands, minus blinds)
                 # The pot already has the blinds from init_new_hand(), so we just update stacks
@@ -138,12 +192,59 @@ def evaluate_dqn_model(
                     if vs_random and current_player == -1:
                         # Random player
                         action = get_random_action(state, current_player)
+                        
+                        # Track opponent action for modeling
+                        if history_manager:
+                            my_bet = state.player1_bet if current_player == -1 else state.player2_bet
+                            to_call = state.current_bet - my_bet
+                            bet_size = 0.0
+                            is_all_in = False
+                            
+                            # Determine bet size from action (simplified)
+                            if action == cfg.ACTION_BET_SMALL:
+                                bet_size = state.pot * 0.5
+                            elif action == cfg.ACTION_BET_MEDIUM:
+                                bet_size = state.pot
+                            elif action == cfg.ACTION_BET_LARGE:
+                                bet_size = state.pot * 2
+                            elif action == cfg.ACTION_ALL_IN:
+                                my_stack = state.player1_stack if current_player == -1 else state.player2_stack
+                                bet_size = my_stack - to_call
+                                is_all_in = True
+                            
+                            is_new_betting_round = (state.stage != previous_stage)
+                            
+                            history_manager.add_action(
+                                opponent_id=OPPONENT_ID,
+                                action_features=ActionFeatureEncoder.encode_action_features(
+                                    action=action,
+                                    bet_size=bet_size,
+                                    pot_size=state.pot,
+                                    stage=state.stage,
+                                    position=0,
+                                    num_players=2,
+                                    had_initiative=(state.current_player == 1),
+                                    to_call=to_call,
+                                    raise_count=0,  # Simplified
+                                    is_all_in=is_all_in
+                                ),
+                                is_new_betting_round=is_new_betting_round
+                            )
                     else:
                         # Model player
                         with torch.no_grad():
-                            state_tensor = torch.FloatTensor(state_vector).unsqueeze(0).to(device)
-                            q_values = model(state_tensor)
-                            q_values = q_values.cpu().numpy()[0]
+                            # Get behavior embedding if available
+                            z = None
+                            if history_manager and history_manager.has_history(OPPONENT_ID):
+                                history = history_manager.get_history(OPPONENT_ID)
+                                z, _ = psychology_network.encode_opponent(history, return_supervised=False)
+                            
+                            state_tensor = torch.FloatTensor(state_vector).to(device)
+                            z_tensor = torch.FloatTensor(z).to(device) if z is not None else None
+                            q_values = model(state_tensor, z_tensor)
+                            q_values = q_values.cpu().numpy()
+                            if q_values.ndim > 1:
+                                q_values = q_values[0]
                             
                             # Mask invalid actions
                             q_values = q_values * valid_actions
@@ -163,6 +264,7 @@ def evaluate_dqn_model(
                     state = game.apply_action(state, action, current_player)
                     action_count += 1
                     total_actions += 1
+                    previous_stage = state.stage
                 
                 # Update chip stacks after hand
                 if game.is_terminal(state):
@@ -334,6 +436,12 @@ if __name__ == "__main__":
                         help="Evaluate with self-play instead of vs random")
     parser.add_argument("--stochastic", action="store_true",
                         help="Use stochastic policy instead of deterministic")
+    parser.add_argument("--use-opponent-modeling", action="store_true",
+                        help="Enable opponent modeling with psychology network")
+    parser.add_argument("--psychology-network", type=str, default=None,
+                        help="Path to pretrained psychology network")
+    parser.add_argument("--behavior-embedding-dim", type=int, default=16,
+                        help="Dimension of behavior embedding (default: 16)")
     
     args = parser.parse_args()
     
@@ -342,6 +450,9 @@ if __name__ == "__main__":
         num_games=args.games,
         hands_per_game=args.hands_per_game,
         vs_random=not args.self_play if args.self_play else args.vs_random,
-        deterministic=not args.stochastic
+        deterministic=not args.stochastic,
+        use_opponent_modeling=args.use_opponent_modeling,
+        psychology_network_path=args.psychology_network,
+        behavior_embedding_dim=args.behavior_embedding_dim
     )
 

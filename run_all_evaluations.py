@@ -45,6 +45,12 @@ def main():
                         help="Skip DQN vs PPO evaluation")
     parser.add_argument("--skip-dqn-mcts", action="store_true",
                         help="Skip DQN vs MCTS evaluation")
+    parser.add_argument("--use-opponent-modeling", action="store_true",
+                        help="Enable opponent modeling for DQN evaluations")
+    parser.add_argument("--psychology-network", type=str, default=None,
+                        help="Path to pretrained psychology network")
+    parser.add_argument("--behavior-embedding-dim", type=int, default=16,
+                        help="Dimension of behavior embedding (default: 16)")
     
     args = parser.parse_args()
     
@@ -53,6 +59,14 @@ def main():
     hands_arg = []
     if args.hands_per_game:
         hands_arg = ["--hands-per-game", str(args.hands_per_game)]
+    
+    # Psychology network arguments for DQN evaluations
+    psych_args = []
+    if args.use_opponent_modeling:
+        psych_args = ["--use-opponent-modeling"]
+        if args.psychology_network:
+            psych_args.extend(["--psychology-network", args.psychology_network])
+        psych_args.extend(["--behavior-embedding-dim", str(args.behavior_embedding_dim)])
     
     print("=" * 80)
     print("RUNNING ALL EVALUATIONS")
@@ -92,7 +106,7 @@ def main():
     
     # 4. DQN vs Random
     if not args.skip_dqn_random:
-        cmd = ["python3", "evaluate_dqn.py", "--model", args.dqn_model, "--vs-random"] + games_arg + hands_arg
+        cmd = ["python3", "evaluate_dqn.py", "--model", args.dqn_model, "--vs-random"] + games_arg + hands_arg + psych_args
         results["DQN vs Random"] = run_command(cmd, "DQN vs Random")
     else:
         print("\nSkipping DQN vs Random")
