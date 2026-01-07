@@ -37,6 +37,8 @@ class PokerGameState:
 
         # Betting round tracking
         self.last_action = None
+        self.betting_round_complete = False  # Track if betting round is complete
+        self.players_acted_this_round = set()  # Track which players have acted this betting round
 
     def copy(self):
         """Create a deep copy of the game state."""
@@ -60,6 +62,8 @@ class PokerGameState:
         new_state.winner = self.winner
         new_state.current_player = self.current_player
         new_state.last_action = self.last_action
+        new_state.betting_round_complete = self.betting_round_complete
+        new_state.players_acted_this_round = self.players_acted_this_round.copy()
 
         return new_state
 
@@ -125,6 +129,8 @@ class PokerGame:
 
         # Player 1 acts first preflop (big blind acts last preflop)
         state.current_player = 1
+        state.betting_round_complete = False  # New betting round
+        state.players_acted_this_round = set()  # No one has acted yet in preflop betting
 
         return state
 
@@ -200,10 +206,9 @@ class PokerGame:
             else:
                 # Check
                 state.last_action = 'check'
-
-            # Check if betting round is complete
-            if state.player1_bet == state.player2_bet:
-                self._advance_stage(state)
+            
+            # Mark this player as having acted
+            state.players_acted_this_round.add(player)
 
         else:
             # Bet or raise
@@ -231,9 +236,26 @@ class PokerGame:
             state.pot += actual_amount
             state.current_bet = max(state.player1_bet, state.player2_bet)
             state.last_action = 'raise'
+            state.betting_round_complete = False  # Raise starts new betting round
+            state.players_acted_this_round = {player}  # Reset - only this player has acted after raise
 
         # Switch player
         state.current_player = -player
+        
+        # Check if betting round is complete AFTER switching players
+        # Only advance if:
+        # 1. Both players have acted in this betting round
+        # 2. Both players' bets match (betting round complete)
+        # 3. Last action was check/call (not a raise)
+        # 4. We haven't already advanced this betting round
+        if (not state.betting_round_complete and
+            len(state.players_acted_this_round) == 2 and  # Both players have acted
+            state.player1_bet == state.player2_bet and 
+            state.last_action in ['check', 'call']):
+            # Mark betting round as complete to prevent double advancement
+            state.betting_round_complete = True
+            # Both players have acted and bets match - advance to next stage
+            self._advance_stage(state)
 
         return state
 
@@ -243,6 +265,8 @@ class PokerGame:
         state.player1_bet = 0
         state.player2_bet = 0
         state.current_bet = 0
+        state.betting_round_complete = False  # Reset for new betting round
+        state.players_acted_this_round = set()  # Reset for new betting round
 
         if state.stage == 0:
             # Deal flop

@@ -187,5 +187,4 @@ Track these metrics:
 - **Reward distribution**: Should become more balanced
 - **Action diversity**: Model should explore different strategies
 
-Good luck training your poker bot! 🎰
 

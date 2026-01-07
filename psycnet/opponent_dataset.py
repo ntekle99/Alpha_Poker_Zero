@@ -2,7 +2,7 @@
 
 import numpy as np
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 from config import PokerConfig as cfg
 try:

@@ -1,0 +1,10 @@
+.app {
+  width: 100vw;
+  height: 100vh;
+  background-color: #2a2a2a;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+}
+

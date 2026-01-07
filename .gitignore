@@ -1,2 +1,11 @@
-/poker-rl
-/__pycache__/
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.env

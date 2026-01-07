@@ -161,8 +161,6 @@ python evaluate_dqn.py \
 
 ## Summary
 
-✅ **Everything is linked together!**
-
 - `evaluate_dqn.py` supports opponent modeling
 - `run_all_evaluations.py` passes psychology network args
 - Automatic backward compatibility
